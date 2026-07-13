@@ -1,2 +1,4 @@
 *xlsx
 __pycache__/*
+.env
+*.md
