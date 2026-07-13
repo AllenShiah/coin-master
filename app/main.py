@@ -11,39 +11,23 @@ import logging
 
 from fastapi import FastAPI, Request, Response
 
-from app.config import settings
-from app.line_client import LineClient
-from app.line_models import WebhookRequest
-from app.repository import InMemoryLoanRepository, LoanRepository
+from app.line import LineClient, WebhookRequest
+from app.repository import build_repository
+from app.repository.config import settings as supabase_settings
 from app.service import LoanBotService
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("coin_master")
 
 
-def build_repository() -> LoanRepository:
-    """Pick the store based on configuration.
-
-    Supabase when credentials are present, otherwise an in-memory store so the
-    API can be driven end-to-end without a database.
-    """
-    if settings.supabase_enabled:
-        from app.supabase_repository import SupabaseLoanRepository
-
-        logger.info("Using Supabase repository at %s", settings.supabase_url)
-        return SupabaseLoanRepository(settings)
-    logger.warning("Supabase not configured -- using in-memory repository")
-    return InMemoryLoanRepository()
-
-
 app = FastAPI(title="Coin-Master LINE Loan Bot")
-line_client = LineClient(settings)
-service = LoanBotService(build_repository(), config=settings)
+line_client = LineClient()
+service = LoanBotService(build_repository())
 
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "storage": "supabase" if settings.supabase_enabled else "memory"}
+    return {"status": "ok", "storage": "supabase" if supabase_settings.enabled else "memory"}
 
 
 @app.post("/line-bot")

@@ -8,9 +8,9 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from app.domain import BORROW, LoanTransaction
-from app.parser import FORMAT_EXAMPLE
-from app.reports import CREDITOR, DEBTOR, CheckReport, MonthLine, RoleReport
+from app.service.reports import CREDITOR, DEBTOR, CheckReport, MonthLine, RoleReport
+from app.util.domain import BORROW, LoanTransaction
+from app.util.parser import FORMAT_EXAMPLE
 
 
 def _money(value: Decimal) -> str:

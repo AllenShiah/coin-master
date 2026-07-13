@@ -12,23 +12,24 @@ from decimal import Decimal
 
 import httpx
 
-from app.config import Settings, settings
-from app.domain import LoanTransaction, User, WebhookEvent
+from app.repository.base import LoanRepository
+from app.repository.config import SupabaseSettings, settings
+from app.util.domain import LoanTransaction, User, WebhookEvent
 
 _TIMEOUT_SECONDS = 10.0
 
 
-class SupabaseLoanRepository:
+class SupabaseLoanRepository(LoanRepository):
     """PostgREST-backed store. Interface-compatible with LoanRepository."""
 
-    def __init__(self, config: Settings = settings) -> None:
-        self._rest = f"{config.supabase_url}/rest/v1"
+    def __init__(self, config: SupabaseSettings = settings) -> None:
+        self._rest = f"{config.url}/rest/v1"
         self._client = httpx.Client(
             base_url=self._rest,
             timeout=_TIMEOUT_SECONDS,
             headers={
-                "apikey": config.supabase_key,
-                "Authorization": f"Bearer {config.supabase_key}",
+                "apikey": config.key,
+                "Authorization": f"Bearer {config.key}",
                 "Content-Type": "application/json",
             },
         )

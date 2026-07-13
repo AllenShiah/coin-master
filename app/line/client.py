@@ -19,7 +19,7 @@ import logging
 
 import httpx
 
-from app.config import Settings, settings
+from app.line.config import LineSettings, settings
 
 logger = logging.getLogger("coin_master.line")
 
@@ -28,16 +28,16 @@ _MAX_LINE_TEXT = 5000  # LINE rejects text messages longer than 5000 chars.
 
 
 class LineClient:
-    def __init__(self, config: Settings = settings) -> None:
+    def __init__(self, config: LineSettings = settings) -> None:
         self._config = config
 
     # -- security ------------------------------------------------------------
     def verify_signature(self, body: bytes, signature: str) -> bool:
         """Constant-time check of LINE's request signature."""
-        if not self._config.line_channel_secret or not signature:
+        if not self._config.channel_secret or not signature:
             return False
         digest = hmac.new(
-            self._config.line_channel_secret.encode("utf-8"),
+            self._config.channel_secret.encode("utf-8"),
             body,
             hashlib.sha256,
         ).digest()
@@ -47,7 +47,7 @@ class LineClient:
     def sign(self, body: bytes) -> str:
         """Produce a signature for ``body`` (used by the local test harness)."""
         digest = hmac.new(
-            self._config.line_channel_secret.encode("utf-8"),
+            self._config.channel_secret.encode("utf-8"),
             body,
             hashlib.sha256,
         ).digest()
@@ -55,30 +55,30 @@ class LineClient:
 
     # -- outbound messages ---------------------------------------------------
     def reply(self, reply_token: str, text: str) -> None:
-        if not self._config.line_reply_enabled:
+        if not self._config.reply_enabled:
             logger.info("[log-only] reply -> %s", text)
             return
         self._post(
-            self._config.line_reply_endpoint,
+            self._config.reply_endpoint,
             {"replyToken": reply_token, "messages": self._text_messages(text)},
         )
 
     def push(self, to_line_user_id: str, text: str) -> None:
-        if not self._config.line_reply_enabled:
+        if not self._config.reply_enabled:
             logger.info("[log-only] push %s -> %s", to_line_user_id, text)
             return
         self._post(
-            self._config.line_push_endpoint,
+            self._config.push_endpoint,
             {"to": to_line_user_id, "messages": self._text_messages(text)},
         )
 
     # -- profile -------------------------------------------------------------
     def get_display_name(self, line_user_id: str) -> str | None:
-        if not self._config.line_reply_enabled:
+        if not self._config.reply_enabled:
             return None
         try:
             response = httpx.get(
-                f"{self._config.line_profile_endpoint}/{line_user_id}",
+                f"{self._config.profile_endpoint}/{line_user_id}",
                 headers=self._auth_headers(),
                 timeout=_TIMEOUT_SECONDS,
             )
@@ -103,7 +103,7 @@ class LineClient:
 
     def _auth_headers(self) -> dict[str, str]:
         return {
-            "Authorization": f"Bearer {self._config.line_channel_access_token}",
+            "Authorization": f"Bearer {self._config.channel_access_token}",
             "Content-Type": "application/json",
         }
 

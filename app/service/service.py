@@ -12,19 +12,11 @@ from collections import defaultdict
 from datetime import date
 from decimal import Decimal
 
-from app.config import Settings, settings
-from app.domain import LoanTransaction, WebhookEvent
 from app.interest import InterestCalculator, LoanEntry
-from app.line_models import Event
-from app.parser import (
-    CheckCommand,
-    FormatError,
-    Ignored,
-    MentionRef,
-    MessageParser,
-    RegisterCommand,
-)
-from app.reports import (
+from app.line.models import Event
+from app.repository import LoanRepository
+from app.service.config import ServiceSettings, settings
+from app.service.reports import (
     CREDITOR,
     DEBTOR,
     CheckReport,
@@ -32,7 +24,15 @@ from app.reports import (
     MonthLine,
     RoleReport,
 )
-from app.repository import LoanRepository
+from app.util.domain import LoanTransaction, WebhookEvent
+from app.util.parser import (
+    CheckCommand,
+    FormatError,
+    Ignored,
+    MentionRef,
+    MessageParser,
+    RegisterCommand,
+)
 
 _MESSAGE = "message"
 _TEXT = "text"
@@ -44,11 +44,11 @@ class LoanBotService:
         repository: LoanRepository,
         parser: MessageParser | None = None,
         calculator: InterestCalculator | None = None,
-        config: Settings = settings,
+        config: ServiceSettings = settings,
     ) -> None:
         self._repo = repository
         self._parser = parser or MessageParser()
-        self._calc = calculator or InterestCalculator(config)
+        self._calc = calculator or InterestCalculator()
         self._config = config
 
     # -- entry point ---------------------------------------------------------
@@ -77,7 +77,7 @@ class LoanBotService:
     def _dispatch(
         self, command, sender_id: str, event: WebhookEvent, today: date
     ) -> str | None:
-        from app.formatting import format_check, format_format_error, format_register
+        from app.util.formatting import format_check, format_format_error, format_register
 
         if isinstance(command, RegisterCommand):
             transaction = self._register(command, sender_id, event)

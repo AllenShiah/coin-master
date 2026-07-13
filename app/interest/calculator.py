@@ -20,7 +20,7 @@ from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Iterable
 
-from app.config import Settings, settings
+from app.interest.config import InterestSettings, settings
 
 
 @dataclass(frozen=True)
@@ -53,9 +53,9 @@ class MonthlyInterest:
 
 
 class InterestCalculator:
-    """Pure interest math driven entirely by :class:`Settings`."""
+    """Pure interest math driven entirely by :class:`InterestSettings`."""
 
-    def __init__(self, config: Settings = settings) -> None:
+    def __init__(self, config: InterestSettings = settings) -> None:
         self._days_per_year = config.days_per_year
         self._quantize = config.money_quantize
         self._start_day = config.statement_start_day

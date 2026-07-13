@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
 
-from app.domain import BORROW, REPAY
+from app.util.domain import BORROW, REPAY
 
 # A percentage in the message ("2.92%") is divided by this to get a fraction.
 _PERCENT = Decimal("100")
