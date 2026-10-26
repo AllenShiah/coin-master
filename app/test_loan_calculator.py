@@ -151,5 +151,97 @@ class WorkbookAndReportTests(unittest.TestCase):
         self.assertNotIn("Bob", output.getvalue())
 
 
+class DebtorSheetTests(unittest.TestCase):
+    """A sheet with a Debtor column is split into one user per Debtor."""
+
+    def make_workbook(self, path: Path) -> None:
+        workbook = Workbook()
+        pooled = workbook.active
+        pooled.title = "CK2"
+        pooled.append(["Date", "Amount", "Debtor"])
+        pooled.append([date(2026, 5, 10), 10000, "Olivia"])
+        pooled.append([date(2026, 5, 11), 20000, "Allen"])
+        pooled.append([date(2026, 5, 12), -5000, "Olivia"])
+        legacy = workbook.create_sheet("Bob(CK3)")
+        legacy.append(["Date", "Amount"])
+        legacy.append([date(2026, 5, 10), 1000])
+        workbook.save(path)
+
+    def load(self, sheet: str | None = None) -> dict[str, list[Transaction]]:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "loan.xlsx"
+            self.make_workbook(path)
+            return load_loan_workbook(path, sheet)
+
+    def test_debtor_column_splits_sheet_into_users(self) -> None:
+        users = self.load("CK2")
+        self.assertEqual(set(users), {"Olivia", "Allen"})
+        self.assertEqual([t.amount for t in users["Olivia"]], [Decimal("10000"), Decimal("-5000")])
+        self.assertEqual([t.amount for t in users["Allen"]], [Decimal("20000")])
+
+    def test_sheet_without_debtor_column_is_one_user_named_after_sheet(self) -> None:
+        self.assertEqual(set(self.load()), {"Olivia", "Allen", "Bob(CK3)"})
+
+    def test_unknown_sheet_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "sheet does not exist"):
+            self.load("Nope")
+
+    def test_blank_debtor_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "loan.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.append(["Date", "Amount", "Debtor"])
+            sheet.append([date(2026, 5, 10), 10000, None])
+            workbook.save(path)
+            with self.assertRaisesRegex(ValueError, "Debtor is required"):
+                load_loan_workbook(path)
+
+    def test_each_debtor_is_calculated_independently(self) -> None:
+        reports = calculate_reports(self.load("CK2"), "0.03", month=5)
+        olivia = reports["Olivia"][0]
+        allen = reports["Allen"][0]
+        # Olivia: 5/10, 5/11 at 10,000; 5/12-5/20 (9 days) at 5,000.
+        expected_olivia = (Decimal("10000") * 2 + Decimal("5000") * 9) * Decimal("0.03") / Decimal("365")
+        # Allen: 5/11-5/20 (10 days) at 20,000.
+        expected_allen = Decimal("20000") * 10 * Decimal("0.03") / Decimal("365")
+        self.assertEqual(olivia.interest_due, expected_olivia.quantize(Decimal("0.01")))
+        self.assertEqual(allen.interest_due, expected_allen.quantize(Decimal("0.01")))
+        self.assertEqual(olivia.outstanding_balance, Decimal("5000.00"))
+        self.assertEqual(allen.outstanding_balance, Decimal("20000.00"))
+
+
+class OutstandingBalanceTests(unittest.TestCase):
+    def test_outstanding_balance_is_balance_at_end_of_statement_window(self) -> None:
+        calculator = LoanInterestCalculator("0.03")
+        transactions = [
+            Transaction(date(2026, 4, 10), Decimal("10000")),
+            Transaction(date(2026, 5, 20), Decimal("-4000")),
+            Transaction(date(2026, 5, 21), Decimal("500")),
+        ]
+        may = calculator.calculate_month(transactions, 2026, 5)
+        june = calculator.calculate_month(transactions, 2026, 6)
+        self.assertEqual(may.outstanding_balance, Decimal("6000.00"))
+        self.assertEqual(june.outstanding_balance, Decimal("6500.00"))
+
+    def test_negative_balance_allowed_accrues_no_interest_and_is_reported(self) -> None:
+        calculator = LoanInterestCalculator("0.03", allow_negative_balance=True)
+        transactions = [
+            Transaction(date(2026, 5, 10), Decimal("-1000")),
+            Transaction(date(2026, 5, 15), Decimal("3000")),
+        ]
+        may = calculator.calculate_month(transactions, 2026, 5)
+        # 5/10-5/14 balance -1,000 -> 0 interest; 5/15-5/20 (6 days) at 2,000.
+        expected = Decimal("2000") * 6 * Decimal("0.03") / Decimal("365")
+        self.assertEqual(may.interest_due, expected.quantize(Decimal("0.01")))
+        self.assertEqual(may.outstanding_balance, Decimal("2000.00"))
+
+    def test_report_keeps_negative_balance_instead_of_raising(self) -> None:
+        users = {"Olivia": [Transaction(date(2026, 5, 10), Decimal("-100"))]}
+        reports = calculate_reports(users, "0.03", month=5)
+        self.assertEqual(reports["Olivia"][0].interest_due, Decimal("0.00"))
+        self.assertEqual(reports["Olivia"][0].outstanding_balance, Decimal("-100.00"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -28,6 +28,7 @@ class MonthlyInterest:
     statement_start: date
     statement_end: date
     interest_due: Decimal
+    outstanding_balance: Decimal
 
 
 def statement_window(year: int, month: int) -> tuple[date, date]:
@@ -42,7 +43,11 @@ def statement_window(year: int, month: int) -> tuple[date, date]:
 class LoanInterestCalculator:
     """Calculate interest using each day's closing loan balance."""
 
-    def __init__(self, annual_rate: Decimal | str | float) -> None:
+    def __init__(
+        self,
+        annual_rate: Decimal | str | float,
+        allow_negative_balance: bool = False,
+    ) -> None:
         try:
             rate = Decimal(str(annual_rate))
         except InvalidOperation as exc:
@@ -52,6 +57,7 @@ class LoanInterestCalculator:
 
         self.annual_rate = rate
         self.daily_rate = rate / DAYS_PER_YEAR
+        self.allow_negative_balance = allow_negative_balance
 
     def calculate_month(
         self,
@@ -60,7 +66,8 @@ class LoanInterestCalculator:
         month: int,
     ) -> MonthlyInterest:
         ordered = sorted(transactions, key=lambda transaction: transaction.occurred_on)
-        self._validate_balances(ordered)
+        if not self.allow_negative_balance:
+            self._validate_balances(ordered)
         start, end = statement_window(year, month)
 
         balance = sum(
@@ -80,7 +87,8 @@ class LoanInterestCalculator:
         while current_day <= end:
             # Same-day loans and repayments affect that day's interest.
             balance += changes_by_day.get(current_day, Decimal("0"))
-            interest += balance * self.daily_rate
+            # An overpaid (negative) balance accrues no interest.
+            interest += max(balance, Decimal("0")) * self.daily_rate
             current_day += timedelta(days=1)
 
         return MonthlyInterest(
@@ -89,6 +97,7 @@ class LoanInterestCalculator:
             statement_start=start,
             statement_end=end,
             interest_due=interest.quantize(MONEY_QUANTIZE, rounding=ROUND_HALF_UP),
+            outstanding_balance=balance.quantize(MONEY_QUANTIZE, rounding=ROUND_HALF_UP),
         )
 
     @staticmethod
@@ -108,7 +117,15 @@ class LoanInterestCalculator:
                 )
 
 
-def load_loan_workbook(path: str | Path) -> dict[str, list[Transaction]]:
+def load_loan_workbook(
+    path: str | Path, sheet: str | None = None
+) -> dict[str, list[Transaction]]:
+    """Read transactions per user.
+
+    A sheet with a Debtor column is split into one user per Debtor value; a
+    sheet without one is a single user named after the sheet. ``sheet`` limits
+    the read to that one sheet.
+    """
     workbook_path = Path(path)
     if not workbook_path.is_file():
         raise ValueError(f"Excel file does not exist: {workbook_path}")
@@ -116,40 +133,68 @@ def load_loan_workbook(path: str | Path) -> dict[str, list[Transaction]]:
     workbook = load_workbook(workbook_path, data_only=True, read_only=True)
     users: dict[str, list[Transaction]] = {}
     try:
-        for worksheet in workbook.worksheets:
-            headers = _header_columns(worksheet)
-            missing = {"date", "amount"} - headers.keys()
-            if missing:
-                names = ", ".join(sorted(missing))
-                raise ValueError(f"sheet '{worksheet.title}' is missing columns: {names}")
-
-            transactions: list[Transaction] = []
-            for row_number, row in enumerate(
-                worksheet.iter_rows(min_row=2, values_only=True), start=2
-            ):
-                raw_date = row[headers["date"]] if headers["date"] < len(row) else None
-                raw_amount = row[headers["amount"]] if headers["amount"] < len(row) else None
-                if raw_date is None and raw_amount is None:
-                    continue
-                if raw_date is None or raw_amount is None:
-                    raise ValueError(
-                        f"sheet '{worksheet.title}', row {row_number}: "
-                        "Date and Amount are both required"
-                    )
-                transactions.append(
-                    Transaction(
-                        occurred_on=_parse_excel_date(
-                            raw_date, workbook.epoch, worksheet.title, row_number
-                        ),
-                        amount=_parse_excel_amount(
-                            raw_amount, worksheet.title, row_number
-                        ),
-                    )
-                )
-            users[worksheet.title] = transactions
+        for worksheet in _select_worksheets(workbook, sheet):
+            _read_sheet(worksheet, workbook.epoch, users)
     finally:
         workbook.close()
     return users
+
+
+def _select_worksheets(workbook: object, sheet: str | None) -> list[object]:
+    if sheet is None:
+        return list(workbook.worksheets)
+    if sheet not in workbook.sheetnames:
+        raise ValueError(f"sheet does not exist: {sheet}")
+    return [workbook[sheet]]
+
+
+def _read_sheet(
+    worksheet: object, epoch: datetime, users: dict[str, list[Transaction]]
+) -> None:
+    headers = _header_columns(worksheet)
+    missing = {"date", "amount"} - headers.keys()
+    if missing:
+        names = ", ".join(sorted(missing))
+        raise ValueError(f"sheet '{worksheet.title}' is missing columns: {names}")
+
+    debtor_column = headers.get("debtor")
+    if debtor_column is None:
+        users.setdefault(worksheet.title, [])
+
+    for row_number, row in enumerate(
+        worksheet.iter_rows(min_row=2, values_only=True), start=2
+    ):
+        raw_date = _cell(row, headers["date"])
+        raw_amount = _cell(row, headers["amount"])
+        raw_debtor = _cell(row, debtor_column)
+        if raw_date is None and raw_amount is None and raw_debtor is None:
+            continue
+        if raw_date is None or raw_amount is None:
+            raise ValueError(
+                f"sheet '{worksheet.title}', row {row_number}: "
+                "Date and Amount are both required"
+            )
+        transaction = Transaction(
+            occurred_on=_parse_excel_date(raw_date, epoch, worksheet.title, row_number),
+            amount=_parse_excel_amount(raw_amount, worksheet.title, row_number),
+        )
+        owner = worksheet.title
+        if debtor_column is not None:
+            owner = _parse_debtor(raw_debtor, worksheet.title, row_number)
+        users.setdefault(owner, []).append(transaction)
+
+
+def _cell(row: tuple, index: int | None) -> object:
+    if index is None or index >= len(row):
+        return None
+    return row[index]
+
+
+def _parse_debtor(raw: object, sheet: str, row: int) -> str:
+    debtor = "" if raw is None else str(raw).strip()
+    if not debtor:
+        raise ValueError(f"sheet '{sheet}', row {row}: Debtor is required")
+    return debtor
 
 
 def _header_columns(worksheet: object) -> dict[str, int]:
@@ -216,7 +261,7 @@ def calculate_reports(
         max(item.occurred_on.year for item in all_transactions) + 1,
     )
     months = (month,) if month is not None else range(1, 13)
-    calculator = LoanInterestCalculator(annual_rate)
+    calculator = LoanInterestCalculator(annual_rate, allow_negative_balance=True)
 
     return {
         username: [
@@ -268,7 +313,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--month", type=month_argument, help="只顯示指定月份（1 至 12）"
     )
-    parser.add_argument("--user", help="只顯示指定的 sheet 使用者")
+    parser.add_argument(
+        "--sheet", help="只讀取指定的 sheet（例如 CK2）；預設讀取全部 sheet"
+    )
+    parser.add_argument("--user", help="只顯示指定的 Debtor（無 Debtor 欄的 sheet 則為 sheet 名稱）")
     return parser
 
 
@@ -276,7 +324,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        users = load_loan_workbook(args.input)
+        users = load_loan_workbook(args.input, args.sheet)
         reports = calculate_reports(users, args.rate, args.month, args.user)
     except ValueError as exc:
         parser.error(str(exc))
@@ -288,7 +336,8 @@ def main(argv: list[str] | None = None) -> int:
         for result in monthly_results:
             print(
                 f"{result.year}年{result.month:02d}月應付利息: "
-                f"{format_money(result.interest_due)}"
+                f"{format_money(result.interest_due)} | "
+                f"欠款總額: {format_money(result.outstanding_balance)}"
             )
     return 0
 
