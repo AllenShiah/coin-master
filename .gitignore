@@ -1,5 +1,6 @@
 *xlsx
 __pycache__/*
+*.pyc
 .env
 *.md
 .python-version
