@@ -160,6 +160,73 @@ class AccountInterestTests(unittest.TestCase):
         )
         self.assertEqual([row.label for row in report.months], ["2026/6"])
 
+    def test_next_two_months_are_projected_from_the_current_balance(self) -> None:
+        # 100,000 costs 8 a day; 7/21-8/20 and 8/21-9/20 are 31 days each.
+        report = calculate_account(
+            account((date(2026, 7, 1), -100000, "Allen"), opened_on=date(2026, 6, 1)),
+            "0.0292",
+            date(2026, 7, 25),
+        )
+        self.assertEqual([row.label for row in report.months], ["2026/6", "2026/7"])
+        self.assertEqual([row.label for row in report.projections], ["2026/8", "2026/9"])
+        for row in report.projections:
+            with self.subTest(month=row.label):
+                self.assertEqual(row.account_balance, Decimal("-100000"))
+                self.assertEqual(row.total_interest, Decimal("-248"))
+                self.assertEqual(row.user_balances, {"Allen": Decimal("-100000")})
+                self.assertEqual(row.user_interests, {"Allen": Decimal("-248")})
+
+    def test_projection_can_be_turned_off(self) -> None:
+        report = calculate_account(
+            account((date(2026, 7, 1), -100000, "Allen")),
+            "0.0292",
+            AS_OF,
+            projected_months=0,
+        )
+        self.assertEqual(report.projections, ())
+        with self.assertRaisesRegex(ValueError, "projected months"):
+            calculate_account(
+                account((date(2026, 7, 1), -100000, "Allen")),
+                "0.0292",
+                AS_OF,
+                projected_months=-1,
+            )
+
+    def test_finished_months_do_not_change_when_the_projection_does(self) -> None:
+        ledger = (
+            (date(2026, 7, 1), -100000, "Allen"),
+            (date(2026, 7, 11), -100000, "Ray"),
+        )
+        before = calculate_account(account(*ledger), "0.0292", date(2026, 7, 25))
+        # A repayment after 7/25 changes the projection, not what already happened.
+        after = calculate_account(
+            account(*ledger, (date(2026, 7, 30), 50000, "Allen")),
+            "0.0292",
+            date(2026, 7, 25),
+        )
+        self.assertEqual(before.months, after.months)
+        self.assertNotEqual(before.projections, after.projections)
+        # Once the month ends, the projected row becomes the finished row, unchanged.
+        later = calculate_account(account(*ledger), "0.0292", date(2026, 8, 25))
+        self.assertEqual(later.months[: len(before.months)], before.months)
+        self.assertEqual(later.months[-1], before.projections[0])
+
+    def test_projected_users_add_up_to_account_totals(self) -> None:
+        report = calculate_account(
+            account(
+                (date(2026, 6, 25), -33333, "A"),
+                (date(2026, 6, 26), -33333, "B"),
+                (date(2026, 6, 27), -33334, "C"),
+            ),
+            "0.0292",
+            date(2026, 7, 25),
+        )
+        self.assertEqual(len(report.projections), 2)
+        for row in report.projections:
+            with self.subTest(month=row.label):
+                self.assertEqual(sum(row.user_balances.values()), row.account_balance)
+                self.assertEqual(sum(row.user_interests.values()), row.total_interest)
+
     def test_interest_charge_without_calculated_interest_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "no calculated interest"):
             calculate_account(
@@ -230,12 +297,17 @@ class WorkbookTests(unittest.TestCase):
         self.assertIn("帳戶: CK3", lines[0])
         self.assertEqual(
             lines[1].split("|")[:-1],
-            [" Month  ", " Account_balance ", " Total_interest ", " Olivia_balance ",
+            [" Month   ", " Account_balance ", " Total_interest ", " Olivia_balance ",
              " Allen_balance ", " Ray_balance ", " Olivia_interest ", " Allen_interest ",
              " Ray_interest "],
         )
-        self.assertEqual(len({len(line) for line in lines[1:]}), 1)
-        self.assertIn("-240", lines[-1])
+        # Title, header, separator, 2026/7 plus two projected rows, then the footnote.
+        self.assertEqual(len({len(line) for line in lines[1:-1]}), 1)
+        self.assertTrue(lines[3].startswith(" 2026/7 "))
+        self.assertIn("-240", lines[3])
+        self.assertTrue(lines[4].startswith(" 2026/8*"))
+        self.assertTrue(lines[5].startswith(" 2026/9*"))
+        self.assertIn("預估月份", lines[-1])
         self.assertNotIn("CK2", output.getvalue())
 
     def test_cli_requires_a_rate_for_every_sheet(self) -> None:

@@ -13,6 +13,8 @@ from openpyxl.utils.datetime import from_excel
 
 WHOLE_DOLLAR = Decimal("1")
 DAYS_PER_YEAR = Decimal("365")
+PROJECTED_MONTHS = 2
+PROJECTED_MARK = "*"
 INTEREST_USER = "Interest"
 REQUIRED_COLUMNS = ("date", "transaction", "account_balance", "user")
 
@@ -64,6 +66,8 @@ class AccountReport:
     annual_rate: Decimal
     users: tuple[str, ...]
     months: tuple[MonthlyRow, ...]
+    # The months after ``months``, assuming no further borrowing or repayment.
+    projections: tuple[MonthlyRow, ...]
     charges: tuple[InterestCharge, ...]
 
 
@@ -121,15 +125,25 @@ def round_preserving_sum(
 
 
 def calculate_account(
-    account: Account, annual_rate: Decimal | str | float, as_of: date
+    account: Account,
+    annual_rate: Decimal | str | float,
+    as_of: date,
+    projected_months: int = PROJECTED_MONTHS,
 ) -> AccountReport:
-    """Build the monthly table for every statement month that ended before ``as_of``."""
+    """Build the monthly table for every statement month that ended before ``as_of``.
+
+    The ``projected_months`` statement months after that are projected by carrying
+    the balance as of the last ledger row forward unchanged. Finished months never
+    depend on the projection, so they stay fixed until new ledger rows arrive.
+    """
     try:
         rate = Decimal(str(annual_rate))
     except InvalidOperation as exc:
         raise ValueError("annual rate must be a number") from exc
     if not rate.is_finite() or rate < 0:
         raise ValueError("annual rate must be a finite, non-negative decimal")
+    if projected_months < 0:
+        raise ValueError("projected months must not be negative")
     daily_rate = rate / DAYS_PER_YEAR
 
     users = _borrowers(account)
@@ -141,6 +155,9 @@ def calculate_account(
     last_month = statement_month(as_of - timedelta(days=1))
     if statement_window(*last_month)[1] >= as_of:
         last_month = previous_month(*last_month)
+    projected_last = last_month
+    for _ in range(projected_months):
+        projected_last = next_month(*projected_last)
 
     balances = {user: Decimal("0") for user in users}
     balances[account.opening_user] += account.opening_balance
@@ -149,11 +166,13 @@ def calculate_account(
     month_totals: dict[tuple[int, int], Decimal] = {}
     month_shares: dict[tuple[int, int], dict[str, Decimal]] = {}
     months: list[MonthlyRow] = []
+    projections: list[MonthlyRow] = []
     charges: list[InterestCharge] = []
 
     current_day = account.opened_on
-    # Walk past the last finished month too, so later bank charges get checked.
-    end_day = max([statement_window(*last_month)[1], *rows_by_day])
+    # Walk past the last finished month too, so later bank charges get checked
+    # and the projected months can be filled in.
+    end_day = max([statement_window(*projected_last)[1], *rows_by_day])
     while current_day <= end_day:
         current_month = statement_month(current_day)
         for row in rows_by_day.get(current_day, ()):
@@ -183,9 +202,9 @@ def calculate_account(
 
         if (
             current_day == statement_window(*current_month)[1]
-            and current_month <= last_month
+            and current_month <= projected_last
         ):
-            months.append(
+            (months if current_month <= last_month else projections).append(
                 _monthly_row(
                     current_month,
                     account_balance,
@@ -201,6 +220,7 @@ def calculate_account(
         annual_rate=rate,
         users=users,
         months=tuple(months),
+        projections=tuple(projections),
         charges=tuple(charges),
     )
 
@@ -481,13 +501,13 @@ def format_table(report: AccountReport) -> str:
     ]
     body = [
         [
-            row.label,
+            row.label + PROJECTED_MARK * (row in report.projections),
             format_money(row.account_balance),
             format_money(row.total_interest),
             *(format_money(row.user_balances[user]) for user in report.users),
             *(format_money(row.user_interests[user]) for user in report.users),
         ]
-        for row in report.months
+        for row in (*report.months, *report.projections)
     ]
     widths = [
         max(_display_width(line[index]) for line in [headers, *body])
@@ -506,10 +526,15 @@ def format_table(report: AccountReport) -> str:
 
 def format_report(report: AccountReport) -> str:
     lines = [f"帳戶: {report.name}（年利率 {(report.annual_rate * 100).normalize():f}%）"]
-    if report.months:
+    if report.months or report.projections:
         lines.append(format_table(report))
     else:
         lines.append("尚無已結束的計息月份。")
+    if report.projections:
+        lines.append(
+            f"{PROJECTED_MARK} 預估月份：假設之後沒有借款或還款，依目前餘額往後推算"
+            "（餘額不含尚未扣收的利息）。"
+        )
     for charge in report.charges:
         if charge.charged != charge.calculated:
             lines.append(
